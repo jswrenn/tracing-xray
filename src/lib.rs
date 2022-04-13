@@ -177,10 +177,19 @@ pub(crate) mod model {
 
     #[derive(Serialize)]
     pub(crate) enum Kind {
-        #[serde(skip)]
         Segment,
         #[serde(rename = "subsegment")]
         Subsegment,
+    }
+
+    impl Kind {
+        fn is_segment(&self) -> bool {
+            if let Self::Segment = &self {
+                true
+            } else {
+                false
+            }
+        }
     }
 
     #[derive(Serialize)]
@@ -191,7 +200,10 @@ pub(crate) mod model {
         pub(crate) trace_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub(crate) parent_id: Option<String>,
-        #[serde(rename = "type")]
+        #[serde(
+            rename = "type",
+            skip_serializing_if = "Kind::is_segment",
+        )]
         pub(crate) kind: Kind,
         pub(crate) metadata: Metadata,
         #[serde(flatten)]
