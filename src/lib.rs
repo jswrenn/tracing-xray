@@ -1,4 +1,3 @@
-use serde::Serialize;
 use std::time::{Duration, SystemTime};
 use tracing_core::Field;
 use tracing_core::span::{Attributes, Id, Record};
@@ -146,6 +145,8 @@ where
 }
 
 pub(crate) mod model {
+    use serde::Serialize;
+
     use super::*;
 
     #[derive(Serialize)]
@@ -202,7 +203,8 @@ pub(crate) mod model {
 
     impl Segment {
         pub fn send(&self) {
-            unimplemented!("TODO");
+            // TODO
+            println!("{}", serde_json::to_string(&self).unwrap());
         }
     }
 
