@@ -9,6 +9,33 @@ use tracing_subscriber::registry::LookupSpan;
 
 pub struct Layer;
 
+#[derive(Clone)]
+pub struct TraceId(String);
+
+impl TraceId {
+    pub fn new() -> Self {
+        use rand::prelude::*;
+
+        let time = 
+            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_secs();
+
+        let mut rng = rand::thread_rng();
+        let a: u32 = rng.gen();
+        let b: u32 = rng.gen();
+        let c: u32 = rng.gen();
+
+        Self(format!("1-{time:08x}-{a:08x}{b:08x}{c:08x}"))
+    }
+}
+
+impl std::fmt::Display for TraceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 struct TraceIdVisitor {
     trace_id: Option<String>,
 }
@@ -82,8 +109,6 @@ where
                 // What we do:
                 // First, check to see if the current span was created with the
                 // field `AWS-XRAY-TRACE-ID`.
-                #[derive(Clone)]
-                struct TraceId(String);
                 let mut visitor = TraceIdVisitor { trace_id: None };
                 attr.record(&mut visitor);
 
