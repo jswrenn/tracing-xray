@@ -43,7 +43,7 @@ struct TraceIdVisitor {
 impl Visit for TraceIdVisitor {
     fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "AWS-XRAY-TRACE-ID" {
+        if field.name() == "AWS_XRAY_TRACE_ID" {
             let _ = self.trace_id.insert(value.to_owned());
         }
     }
@@ -131,7 +131,7 @@ where
                 parent.map(|p| format!("{:08x}",p.id().into_u64()))
             },
             kind:
-                match attr.fields().field("TRACING_XRAY_SEGMENT").is_some() {
+                match attr.fields().field("AWS_XRAY_TRACE_ID").is_some() {
                     true => model::Kind::Segment,
                     false => model::Kind::Subsegment,
                 },
