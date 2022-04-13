@@ -53,7 +53,7 @@ where
                 //
                 // What we do:
                 // Convert `Id` to a `u64`, then format it as hex.
-                format!("{:x}", id.into_u64())
+                format!("{:08x}", id.into_u64())
             },
             start_time: {
                 // What the docs say:
@@ -96,13 +96,14 @@ where
                 } else {
                     // otherwise, walk up the tree till we find a TraceId
                     span.scope()
+                        .skip(1)
                         .find_map(|span| span.extensions().get::<TraceId>().cloned())
-                        .expect("TODO: decide what to do if not a descendent of a trace")
-                        .0
+                        .map(|trace_id| trace_id.0)
+                        .unwrap_or("TODO".to_string())
                 }
             },
             parent_id: {
-                parent.map(|p| format!("{:x}",p.id().into_u64()))
+                parent.map(|p| format!("{:08x}",p.id().into_u64()))
             },
             kind:
                 match attr.fields().field("tracing-xray.segment").is_some() {
@@ -163,6 +164,7 @@ pub(crate) mod model {
         pub(crate) id: String,
         pub(crate) start_time: f64,
         pub(crate) trace_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub(crate) parent_id: Option<String>,
         #[serde(rename = "type")]
         pub(crate) kind: Kind,
