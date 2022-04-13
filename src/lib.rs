@@ -131,7 +131,7 @@ where
                 parent.map(|p| format!("{:08x}",p.id().into_u64()))
             },
             kind:
-                match attr.fields().field("tracing-xray.segment").is_some() {
+                match attr.fields().field("TRACING_XRAY_SEGMENT").is_some() {
                     true => model::Kind::Segment,
                     false => model::Kind::Subsegment,
                 },
