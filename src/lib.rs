@@ -9,12 +9,11 @@ use tracing_subscriber::registry::LookupSpan;
 
 pub struct Layer;
 
-#[derive(Clone)]
-pub struct TraceId(String);
-
-impl TraceId {
-    pub fn new() -> Self {
+pub mod trace_id {
+    /// Generate a fresh X-Ray trace id.
+    pub fn new() -> String {
         use rand::prelude::*;
+        use std::time::{Duration, SystemTime};
 
         let time = 
             SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
@@ -26,13 +25,62 @@ impl TraceId {
         let b: u32 = rng.gen();
         let c: u32 = rng.gen();
 
-        Self(format!("1-{time:08x}-{a:08x}{b:08x}{c:08x}"))
+        format!("1-{time:08x}-{a:08x}{b:08x}{c:08x}")
     }
-}
 
-impl std::fmt::Display for TraceId {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+    pub enum SamplingDecision {
+        Sampled,
+        NotSampled,
+        Requested,
+        Unknown,
+    }
+    
+    impl SamplingDecision {
+        fn from_str(s: &str) -> Self {
+            match s {
+                "1" => Self::Sampled,
+                "0" => Self::NotSampled,
+                "?" => Self::Requested,
+                _ => Self::Unknown,
+            }
+        }
+    }
+
+    pub struct FromHeaders {
+        pub root: String,
+        pub parent: Option<String>,
+        pub sampled: SamplingDecision,
+    }
+
+    pub fn from_headers(headers: &http::header::HeaderMap) -> Option<FromHeaders> {
+        const AWS_XRAY_HEADER: &str = "X-Amzn-Trace-Id";
+        const ROOT_KEY: &str = "Root";
+        const PARENT_KEY: &str = "Parent";
+        const SAMPLED_KEY: &str = "Sampled";
+
+        let header = headers.get(AWS_XRAY_HEADER)?.to_str().ok()?;
+
+        let mut root = None;
+        let mut parent = None;
+        let mut sampled = SamplingDecision::Unknown;
+
+        for entry in header.trim().split_terminator(';') {
+            let mut kv = entry.trim().split('=');
+            let k = kv.next()?.trim_end();
+            let v = kv.next()?.trim_start();
+            match k {
+                ROOT_KEY => drop(root.insert(v.to_owned())),
+                PARENT_KEY => drop(parent.insert(v.to_owned())),
+                SAMPLED_KEY => {sampled = SamplingDecision::from_str(v);},
+                _ => return None,
+            };
+        }
+
+        Some(FromHeaders {
+            root: root?,
+            parent,
+            sampled,
+        })
     }
 }
 
@@ -109,6 +157,8 @@ where
                 // What we do:
                 // First, check to see if the current span was created with the
                 // field `AWS-XRAY-TRACE-ID`.
+                #[derive(Clone)]
+                pub struct TraceId(String);
                 let mut visitor = TraceIdVisitor { trace_id: None };
                 attr.record(&mut visitor);
 
