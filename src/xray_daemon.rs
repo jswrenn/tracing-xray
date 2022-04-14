@@ -8,10 +8,11 @@ pub(crate) struct DaemonClient<S: ClientState> {
     state: S,
 }
 
-struct Start {
+pub struct Start {
     remote_port: u16,
 }
-struct Connected {
+
+pub struct Connected {
     sock: UdpSocket,
 }
 

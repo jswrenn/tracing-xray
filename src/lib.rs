@@ -1,13 +1,37 @@
+use std::io;
 use std::time::{Duration, SystemTime};
-use tracing_core::Field;
-use tracing_core::span::{Attributes, Id, Record};
+use tokio::runtime::Handle;
 use tracing_core::field::Visit;
+use tracing_core::span::{Attributes, Id, Record};
 use tracing_core::subscriber::Subscriber;
+use tracing_core::Field;
 use tracing_serde::AsSerde;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 
-pub struct Layer;
+mod xray_daemon;
+
+pub struct Layer {
+    handle: Handle,
+    connection: xray_daemon::DaemonClient<xray_daemon::Connected>,
+}
+
+impl Layer {
+    pub async fn new() -> io::Result<Self> {
+        Ok(Self {
+            handle: Handle::current(),
+            connection: xray_daemon::DaemonClient::default().connect().await?,
+        })
+    }
+
+    fn send(&self, segment: &model::Segment) -> io::Result<()> {
+        self.handle.block_on(async {
+            let message = serde_json::to_vec(segment).unwrap();
+            self.connection.send(&message[..]).await
+        })?;
+        Ok(())
+    }
+}
 
 pub mod trace_id {
     /// Generate a fresh X-Ray trace id.
@@ -15,10 +39,10 @@ pub mod trace_id {
         use rand::prelude::*;
         use std::time::{Duration, SystemTime};
 
-        let time = 
-            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or(Duration::ZERO)
-                .as_secs();
+        let time = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs();
 
         let mut rng = rand::thread_rng();
         let a: u32 = rng.gen();
@@ -34,7 +58,7 @@ pub mod trace_id {
         Requested,
         Unknown,
     }
-    
+
     impl SamplingDecision {
         fn from_str(s: &str) -> Self {
             match s {
@@ -71,7 +95,9 @@ pub mod trace_id {
             match k {
                 ROOT_KEY => drop(root.insert(v.to_owned())),
                 PARENT_KEY => drop(parent.insert(v.to_owned())),
-                SAMPLED_KEY => {sampled = SamplingDecision::from_str(v);},
+                SAMPLED_KEY => {
+                    sampled = SamplingDecision::from_str(v);
+                }
                 _ => return None,
             };
         }
@@ -109,7 +135,7 @@ where
         let segment = model::Segment {
             name: {
                 // What the docs say:
-                // The logical name of the service that handled the request, up 
+                // The logical name of the service that handled the request, up
                 // to 200 characters. Names can contain Unicode letters,
                 // numbers, and whitespace, and the following symbols: _, ., :,
                 // /, %, &, #, =, +, \, -, @.
@@ -133,13 +159,14 @@ where
             start_time: {
                 // What the docs say:
                 // number that is the time the segment was created, in floating
-                // point seconds in epoch time. 
+                // point seconds in epoch time.
                 //
                 // What we do:
                 // Compute the duration, in floating point seconds, between
                 // the current `SystemTime` and the `UNIX_EPOCH`. If the system
-                // time is earlier than `UNIX_EPOCH`, clamp to `0`. 
-                SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
+                // time is earlier than `UNIX_EPOCH`, clamp to `0`.
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap_or(Duration::ZERO)
                     .as_secs_f64()
             },
@@ -149,7 +176,7 @@ where
                 // For example, 1-58406520-a006649127e371903a2de979.
                 // This includes:
                 // - The version number, that is, 1.
-                // - The time of the original request, in Unix epoch time 
+                // - The time of the original request, in Unix epoch time
                 //   (seconds), in 8 hexadecimal digits.
                 // - A 96-bit identifier for the trace, globally unique, in 24
                 //   hexadecimal digits.
@@ -177,23 +204,20 @@ where
                         .unwrap_or("TODO".to_string())
                 }
             },
-            parent_id: {
-                parent.map(|p| format!("{:08x}",p.id().into_u64()))
+            parent_id: { parent.map(|p| format!("{:08x}", p.id().into_u64())) },
+            kind: match attr.fields().field("AWS_XRAY_TRACE_ID").is_some() {
+                true => model::Kind::Segment,
+                false => model::Kind::Subsegment,
             },
-            kind:
-                match attr.fields().field("AWS_XRAY_TRACE_ID").is_some() {
-                    true => model::Kind::Segment,
-                    false => model::Kind::Subsegment,
-                },
             metadata: model::Metadata {
                 fields: model::Fields::from(attr),
             },
             rest: model::Rest::InProgress(model::InProgress),
         };
-        segment.send();
+        let _ = self.send(&segment);
         extensions.insert(segment);
     }
-    
+
     fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("Span not found, this is a bug");
         let mut extensions = span.extensions_mut();
@@ -201,7 +225,7 @@ where
             segment.metadata.fields.update(values);
         }
     }
-    
+
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         let span = ctx.span(&id).expect("Span not found, this is a bug");
         let mut extensions = span.extensions_mut();
@@ -209,7 +233,8 @@ where
             // complete the segment
             segment.rest = model::Rest::Completed(model::Completed {
                 end_time: {
-                    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
+                    SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
                         .unwrap_or(Duration::ZERO)
                         .as_secs_f64()
                 },
@@ -250,10 +275,7 @@ pub(crate) mod model {
         pub(crate) trace_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub(crate) parent_id: Option<String>,
-        #[serde(
-            rename = "type",
-            skip_serializing_if = "Kind::is_segment",
-        )]
+        #[serde(rename = "type", skip_serializing_if = "Kind::is_segment")]
         pub(crate) kind: Kind,
         pub(crate) metadata: Metadata,
         #[serde(flatten)]
@@ -270,22 +292,22 @@ pub(crate) mod model {
 
     impl Fields {
         pub(crate) fn from(attr: &Attributes<'_>) -> Self {
-            Self(serde_json::to_value(Record::new(attr.values()).as_serde())
-                .expect("impossible, right?"))
+            Self(
+                serde_json::to_value(Record::new(attr.values()).as_serde())
+                    .expect("impossible, right?"),
+            )
         }
-        
+
         pub(crate) fn update(&mut self, record: &Record<'_>) {
             use serde_json::value::Value::Object;
-            let extension = 
-                serde_json::to_value(record.as_serde())
-                    .expect("impossible, right?");
+            let extension = serde_json::to_value(record.as_serde()).expect("impossible, right?");
             match (&mut self.0, extension) {
                 (Object(base), Object(extension)) => {
                     base.extend(extension.into_iter());
-                },
+                }
                 (base, extension) => {
                     *base = extension;
-                },
+                }
             }
         }
     }

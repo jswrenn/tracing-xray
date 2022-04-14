@@ -14,3 +14,4 @@ tracing-core = "0.1"
 tracing-serde = "0.1"
 tracing-subscriber = { version = "0.3.11", features = ["fmt", "json", "std"] }
 tokio = { version = "1.17.0", features = ["net", "rt", "macros"] }
+tokio-util = { version = "0.7.1", features = ["net"] }
