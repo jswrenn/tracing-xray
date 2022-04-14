@@ -240,7 +240,7 @@ where
                 },
             });
             // send the completed segment
-            segment.send();
+            let _ = self.send(&segment);
         }
     }
 }
@@ -309,13 +309,6 @@ pub(crate) mod model {
                     *base = extension;
                 }
             }
-        }
-    }
-
-    impl Segment {
-        pub fn send(&self) {
-            // TODO
-            println!("{}", serde_json::to_string(&self).unwrap());
         }
     }
 
