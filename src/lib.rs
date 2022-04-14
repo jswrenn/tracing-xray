@@ -13,23 +13,24 @@ mod xray_daemon;
 
 pub struct Layer {
     handle: Handle,
-    connection: xray_daemon::DaemonClient<xray_daemon::Connected>,
+    connection: &'static xray_daemon::DaemonClient<xray_daemon::Connected>,
 }
 
 impl Layer {
     pub async fn new() -> io::Result<Self> {
         Ok(Self {
             handle: Handle::current(),
-            connection: xray_daemon::DaemonClient::default().connect().await?,
+            connection: 
+                Box::leak(Box::new(xray_daemon::DaemonClient::default().connect().await?)),
         })
     }
 
-    fn send(&self, segment: &model::Segment) -> io::Result<()> {
-        self.handle.block_on(async {
-            let message = serde_json::to_vec(segment).unwrap();
-            self.connection.send(&message[..]).await
-        })?;
-        Ok(())
+    fn send(&self, segment: &model::Segment) {
+        let connection = self.connection;
+        let message = serde_json::to_vec(segment).unwrap();
+        let _ = self.handle.spawn(async move {
+            connection.send(&message[..]).await
+        });
     }
 }
 
