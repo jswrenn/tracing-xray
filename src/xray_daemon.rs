@@ -46,7 +46,11 @@ impl Default for DaemonClient<Start> {
 
 impl DaemonClient<Connected> {
     pub(crate) async fn send(&self, buf: &[u8]) -> io::Result<usize> {
-        self.state.sock.send(&[DAEMON_HEADER, buf].concat()).await
+        let newline = b"\n";
+        self.state
+            .sock
+            .send(&[DAEMON_HEADER, buf, newline].concat())
+            .await
     }
 }
 

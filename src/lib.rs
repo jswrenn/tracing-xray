@@ -155,7 +155,7 @@ where
                 //
                 // What we do:
                 // Convert `Id` to a `u64`, then format it as hex.
-                format!("{:08x}", id.into_u64())
+                format!("{:016x}", id.into_u64())
             },
             start_time: {
                 // What the docs say:
@@ -205,7 +205,7 @@ where
                         .unwrap_or("TODO".to_string())
                 }
             },
-            parent_id: { parent.map(|p| format!("{:08x}", p.id().into_u64())) },
+            parent_id: { parent.map(|p| format!("{:016x}", p.id().into_u64())) },
             kind: match attr.fields().field("AWS_XRAY_TRACE_ID").is_some() {
                 true => model::Kind::Segment,
                 false => model::Kind::Subsegment,
