@@ -150,6 +150,7 @@ impl Serialize for InProgress {
 
 #[derive(Serialize)]
 pub(crate) struct Completed {
+    #[serde(serialize_with = "serialize_time")]
     end_time: SystemTime,
 }
 
