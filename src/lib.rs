@@ -1,22 +1,27 @@
 use std::io;
 use std::string::ToString;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use tokio::runtime::Handle;
 use tracing_core::field::Visit;
 use tracing_core::span::{Attributes, Id, Record};
 use tracing_core::subscriber::Subscriber;
 use tracing_core::Field;
-use tracing_serde::AsSerde;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 
+mod model;
+pub mod trace_id;
 mod xray_daemon;
 
 /// Add `aws.xray.trace_id` as a field to a tracing span to designate it as an
 /// X-Ray segment. Set the value of this field to either a
 /// [fresh trace id][trace_id::new], or one
 /// [parsed from HTTP headers][trace_id::from_headers].
-pub const TRACE_ID_FIELD: &'static str = "aws.xray.trace_id";
+pub const TRACE_ID_FIELD: &str = "aws.xray.trace_id";
+
+/// Prefix span fields that you'd like to classify as X-Ray [annotations] with
+/// `aws.xray.annotations.`.
+pub const ANNOTATION_PREFIX: &str = "aws.xray.annotations.";
 
 /// A [tracing_subscriber] [`Layer`][tracing_subscriber::layer::Layer] that
 /// emits traces to an [AWS X-Ray daemon].
@@ -56,126 +61,6 @@ impl Layer {
     }
 }
 
-/// Utilities for generating/parsing AWS X-Ray `trace_id`s.
-pub mod trace_id {
-    /// Generate a fresh X-Ray trace id.
-    pub fn new() -> String {
-        use rand::prelude::*;
-        use std::time::{Duration, SystemTime};
-
-        let time = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_secs();
-
-        let mut rng = rand::thread_rng();
-        let a: u32 = rng.gen();
-        let b: u32 = rng.gen();
-        let c: u32 = rng.gen();
-
-        format!("1-{time:08x}-{a:08x}{b:08x}{c:08x}")
-    }
-
-    pub enum SamplingDecision {
-        Sampled,
-        NotSampled,
-        Requested,
-        Unknown,
-    }
-
-    impl SamplingDecision {
-        fn from_str(s: &str) -> Self {
-            match s {
-                "1" => Self::Sampled,
-                "0" => Self::NotSampled,
-                "?" => Self::Requested,
-                _ => Self::Unknown,
-            }
-        }
-    }
-
-    /// The result of [`from_headers`].
-    pub struct FromHeaders {
-        pub root: String,
-        pub parent: Option<String>,
-        pub sampled: SamplingDecision,
-    }
-
-    /// Parse an [AWS X-Ray tracing header] from the given http headers.
-    ///
-    /// [AWS X-Ray tracing header]: https://docs.aws.amazon.com/xray/latest/devguide/xray-concepts.html#xray-concepts-tracingheader
-    pub fn from_headers(headers: &http::header::HeaderMap) -> Option<FromHeaders> {
-        const AWS_XRAY_HEADER: &str = "X-Amzn-Trace-Id";
-        const ROOT_KEY: &str = "Root";
-        const PARENT_KEY: &str = "Parent";
-        const SAMPLED_KEY: &str = "Sampled";
-
-        let header = headers.get(AWS_XRAY_HEADER)?.to_str().ok()?;
-
-        let mut root = None;
-        let mut parent = None;
-        let mut sampled = SamplingDecision::Unknown;
-
-        for entry in header.trim().split_terminator(';') {
-            let mut kv = entry.trim().split('=');
-            let k = kv.next()?.trim_end();
-            let v = kv.next()?.trim_start();
-            match k {
-                ROOT_KEY => drop(root.insert(v.to_owned())),
-                PARENT_KEY => drop(parent.insert(v.to_owned())),
-                SAMPLED_KEY => {
-                    sampled = SamplingDecision::from_str(v);
-                }
-                _ => return None,
-            };
-        }
-
-        Some(FromHeaders {
-            root: root?,
-            parent,
-            sampled,
-        })
-    }
-    
-    use tracing_core::span::Attributes;
-    use tracing_core::subscriber::Subscriber;
-    use tracing_subscriber::registry::{
-        LookupSpan,
-        SpanRef,
-    };
-
-    /// Extrace an AWS X-Ray `trace_id` from a tracing `Span`
-    pub fn from_span<'a, S>(
-        span: &SpanRef<'a, S>,
-        attr: &Attributes<'_>,
-    ) -> Option<String>
-    where
-        S: Subscriber + for<'span> LookupSpan<'span> + Send + Sync,
-    {
-        #[derive(Clone)]
-        pub struct TraceId(String);
-        let mut visitor = crate::TraceIdVisitor { trace_id: None };
-        attr.record(&mut visitor);
-        
-        let mut extensions = span.extensions_mut();
-        if let Some(trace_id) = visitor.trace_id {
-            // If so, that's our trace_id. We insert `trace_id` into
-            // this span's associated data, so that descendents can
-            // more easily look it up.
-            extensions.insert(TraceId(trace_id.clone()));
-            Some(trace_id)
-        } else {
-            // otherwise, walk up the tree till we find a TraceId
-            let trace_id = span
-                .scope()
-                .skip(1)
-                .find_map(|span| span.extensions().get::<TraceId>().cloned())
-                .map(|trace_id| trace_id.0);
-            trace_id
-        }
-    }
-}
-
 /// A [visitor][Visit] that searches for fields named
 /// [`aws.xray.trace_id`][TRACE_ID_FIELD] and records their value.
 struct TraceIdVisitor {
@@ -207,13 +92,14 @@ where
             return;
         };
 
-        let record = Record::new(attr.values());
-        let (mut metadata, mut annotations) = crate::model::metadata_and_annotations_from(&record);
-
         let kind = match attr.fields().field(TRACE_ID_FIELD).is_some() {
             true => model::Kind::Segment,
             false => model::Kind::Subsegment,
         };
+
+        // prepare X-Ray annotations and metadata for this span
+        let record = Record::new(attr.values());
+        let (mut metadata, mut annotations) = crate::model::metadata_and_annotations_from(&record);
 
         annotations
             .fields
@@ -238,31 +124,10 @@ where
                     model::Kind::Subsegment => attr.metadata().name().to_owned(),
                 }
             },
-            id: {
-                // What the docs say:
-                // A 64-bit identifier for the segment, unique among segments in
-                // the same trace, in 16 hexadecimal digits.
-                //
-                // What we do:
-                // Convert `Id` to a `u64`, then format it as hex.
-                format!("{:016x}", id.into_u64())
-            },
-            start_time: {
-                // What the docs say:
-                // number that is the time the segment was created, in floating
-                // point seconds in epoch time.
-                //
-                // What we do:
-                // Compute the duration, in floating point seconds, between
-                // the current `SystemTime` and the `UNIX_EPOCH`. If the system
-                // time is earlier than `UNIX_EPOCH`, clamp to `0`.
-                SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO)
-                    .as_secs_f64()
-            },
+            id: model::Id(id.to_owned()),
+            start_time: SystemTime::now(),
             trace_id,
-            parent_id: { span.parent().map(|p| format!("{:016x}", p.id().into_u64())) },
+            parent_id: span.parent().map(|p| model::Id(p.id())),
             kind,
             metadata,
             annotations,
@@ -289,165 +154,9 @@ where
         let mut extensions = span.extensions_mut();
         if let Some(segment) = extensions.get_mut::<model::Segment>() {
             // complete the segment
-            segment.rest = model::Rest::Completed(model::Completed {
-                end_time: {
-                    SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or(Duration::ZERO)
-                        .as_secs_f64()
-                },
-            });
+            segment.complete();
             // send the completed segment
-            let _ = self.send(&segment);
+            let _ = self.send(segment);
         }
-    }
-}
-
-pub(crate) mod model {
-    use serde::Serialize;
-
-    use super::*;
-
-    #[derive(Serialize)]
-    pub(crate) enum Kind {
-        Segment,
-        #[serde(rename = "subsegment")]
-        Subsegment,
-    }
-
-    impl Kind {
-        fn is_segment(&self) -> bool {
-            if let Self::Segment = &self {
-                true
-            } else {
-                false
-            }
-        }
-    }
-
-    #[derive(Serialize)]
-    pub(crate) struct Segment {
-        pub(crate) name: String,
-        pub(crate) id: String,
-        pub(crate) start_time: f64,
-        pub(crate) trace_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub(crate) parent_id: Option<String>,
-        #[serde(rename = "type", skip_serializing_if = "Kind::is_segment")]
-        pub(crate) kind: Kind,
-        pub(crate) metadata: Metadata,
-        pub(crate) annotations: Annotations,
-        #[serde(flatten)]
-        pub(crate) rest: Rest,
-    }
-
-    #[derive(Serialize, Default)]
-    pub(crate) struct Metadata {
-        #[serde(flatten)]
-        pub(crate) fields: Fields,
-    }
-
-    impl Metadata {
-        pub(crate) fn update(&mut self, updates: Self) {
-            self.fields.update(updates.fields)
-        }
-    }
-
-    #[derive(Serialize, Default)]
-    pub(crate) struct Annotations {
-        #[serde(flatten)]
-        pub(crate) fields: Fields,
-    }
-    
-    impl Annotations {
-        pub(crate) fn update(&mut self, updates: Self) {
-            self.fields.update(updates.fields)
-        }
-    }
-
-    pub(crate) fn metadata_and_annotations_from(record: &Record<'_>) -> (Metadata, Annotations) {
-        use serde_json::Value::Object;
-        let json = serde_json::to_value(record.as_serde()).expect("impossible, right?");
-
-        let mut annotations = serde_json::Map::new();
-        let mut metadata = serde_json::Map::new();
-        if let Object(map) = json {
-            for (field, value) in map {
-                if field == TRACE_ID_FIELD {
-                    // don't add the TRACE_ID span field to either metadata or annotations;
-                    // it's already reflected as a top-level item in the segment document
-                    continue;
-                } else if let Some(("", field)) = field.split_once("aws.xray.annotations.") {
-                    // `key` is an annotation
-                    annotations.insert(field.to_owned(), value);
-                } else {
-                    // `key` is metadata
-                    metadata.insert(field, value);
-                }
-            }
-        }
-        let metadata = Metadata {
-            fields: Fields(Object(metadata)),
-        };
-        let annotations = Annotations {
-            fields: Fields(Object(annotations)),
-        };
-        (metadata, annotations)
-    }
-
-    #[derive(Serialize, Default)]
-    pub(crate) struct Fields(serde_json::Value);
-
-    impl Fields {
-        pub(crate) fn add<K, V>(&mut self, name: K, value: V)
-        where
-            K: std::string::ToString,
-            V: Serialize,
-        {
-            use serde_json::Value::Object;
-            if let Object(map) = &mut self.0 {
-                let value = serde_json::to_value(value).unwrap();
-                map.insert(name.to_string(), value);
-            }
-        }
-
-        pub(crate) fn update(&mut self, update: Self) {
-            use serde_json::Value::Object;
-            match (&mut self.0, update.0) {
-                (Object(base), Object(extension)) => {
-                    base.extend(extension.into_iter());
-                }
-                (base, extension) => {
-                    *base = extension;
-                }
-            }
-        }
-    }
-
-    #[derive(Serialize)]
-    #[serde(untagged)]
-    pub(crate) enum Rest {
-        InProgress(InProgress),
-        Completed(Completed),
-    }
-
-    pub(crate) struct InProgress;
-
-    impl Serialize for InProgress {
-        #[inline]
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            use serde::ser::SerializeStruct;
-            let mut in_progress = serializer.serialize_struct("InProgress", 3)?;
-            in_progress.serialize_field("in_progress", &true)?;
-            in_progress.end()
-        }
-    }
-
-    #[derive(Serialize)]
-    pub(crate) struct Completed {
-        pub(crate) end_time: f64,
     }
 }
