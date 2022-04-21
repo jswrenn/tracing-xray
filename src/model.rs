@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime};
 use tracing_core::span::Record;
 use tracing_serde::AsSerde;
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub(crate) enum Kind {
     Segment,
     #[serde(rename = "subsegment")]
@@ -16,7 +16,7 @@ impl Kind {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub(crate) struct Segment {
     pub(crate) name: String,
     pub(crate) id: Id,
@@ -42,7 +42,7 @@ impl Segment {
     }
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub(crate) struct Metadata {
     #[serde(flatten)]
     pub(crate) fields: Fields,
@@ -54,7 +54,7 @@ impl Metadata {
     }
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub(crate) struct Annotations {
     #[serde(flatten)]
     pub(crate) fields: Fields,
@@ -97,7 +97,7 @@ pub(crate) fn metadata_and_annotations_from(record: &Record<'_>) -> (Metadata, A
     (metadata, annotations)
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub(crate) struct Fields(serde_json::Value);
 
 impl Fields {
@@ -126,13 +126,14 @@ impl Fields {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(untagged)]
 pub(crate) enum Rest {
     InProgress(InProgress),
     Completed(Completed),
 }
 
+#[derive(Clone)]
 pub(crate) struct InProgress;
 
 impl Serialize for InProgress {
@@ -148,7 +149,7 @@ impl Serialize for InProgress {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub(crate) struct Completed {
     #[serde(serialize_with = "serialize_time")]
     end_time: SystemTime,
@@ -166,7 +167,7 @@ where
     s.serialize_f64(secs)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub(crate) struct Id(#[serde(serialize_with = "serialize_id")] pub(crate) tracing_core::span::Id);
 
 fn serialize_id<S>(id: &tracing_core::span::Id, s: S) -> Result<S::Ok, S::Error>

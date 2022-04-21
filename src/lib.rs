@@ -1,7 +1,8 @@
 use std::io;
 use std::string::ToString;
 use std::time::SystemTime;
-use tokio::runtime::Handle;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing_core::field::Visit;
 use tracing_core::span::{Attributes, Id, Record};
 use tracing_core::subscriber::Subscriber;
@@ -31,9 +32,15 @@ pub const ANNOTATION_PREFIX: &str = "aws.xray.annotations.";
 ///
 /// [AWS X-Ray daemon]: https://docs.aws.amazon.com/xray/latest/devguide/xray-daemon.html
 pub struct Layer {
-    handle: Handle,
-    connection: &'static xray_daemon::DaemonClient<xray_daemon::Connected>,
+    handle: JoinHandle<io::Result<()>>,
+    sender: mpsc::Sender<model::Segment>,
     service_name: String,
+}
+
+impl std::ops::Drop for Layer {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
 }
 
 impl Layer {
@@ -42,22 +49,24 @@ impl Layer {
     /// The given `service_name` is used as the `name` for segment documentes
     /// emitted by this layer.
     pub async fn new(service_name: impl ToString) -> io::Result<Self> {
+        let connection = xray_daemon::DaemonClient::default().connect().await?;
+        let (sender, mut receiver) = mpsc::channel::<model::Segment>(1000);
         Ok(Self {
-            handle: Handle::current(),
-            connection: Box::leak(Box::new(
-                xray_daemon::DaemonClient::default().connect().await?,
-            )),
+            handle: tokio::spawn(async move {
+                while let Some(segment) = receiver.recv().await {
+                    let message = serde_json::to_vec(&segment).unwrap();
+                    connection.send(&message[..]).await?;
+                }
+                Ok(())
+            }),
+            sender,
             service_name: service_name.to_string(),
         })
     }
 
     /// Emit a given [`model::Segment`].
     fn send(&self, segment: &model::Segment) {
-        let connection = self.connection;
-        let message = serde_json::to_vec(segment).unwrap();
-        let _ = self
-            .handle
-            .spawn(async move { connection.send(&message[..]).await });
+        let _ = self.sender.try_send(segment.to_owned());
     }
 }
 
